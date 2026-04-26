@@ -7,6 +7,7 @@ import hashlib
 import logging
 import pathlib
 import re
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -438,7 +439,7 @@ class NightScout:
 def main():
     """Main function to sync CGM data from EasyView to Nightscout."""
 
-    SECRETS_FILE = pathlib.Path.home() / ".nightscout_easyview/secrets.yaml"
+    secrets_file = pathlib.Path(os.getenv("SECRETS_FILE", str(pathlib.Path.home() / ".nightscout_easyview/secrets.yaml")))
     with secrets_file.open(encoding="utf-8") as f:
         secrets = yaml.safe_load(f)
     username = secrets["easyview"]["username"]
