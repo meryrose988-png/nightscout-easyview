@@ -438,7 +438,7 @@ class NightScout:
 def main():
     """Main function to sync CGM data from EasyView to Nightscout."""
 
-    secrets_file = pathlib.Path.home() / ".nightscout_easyview/secrets.yaml"
+    SECRETS_FILE = pathlib.Path.home() / ".nightscout_easyview/secrets.yaml"
     with secrets_file.open(encoding="utf-8") as f:
         secrets = yaml.safe_load(f)
     username = secrets["easyview"]["username"]
