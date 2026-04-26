@@ -5,121 +5,16 @@ import hashlib
 import logging
 import os
 import pathlib
-import re
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from enum import Enum
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Iterator
+from typing import Any
 
 import requests
 import yaml
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SensorStatus:
-    device_type: str
-    glucose: float
-    glucose_rate: int
-    sensor_id: int
-    sequence: int
-    serial: int
-    status: Status | None
-    update_time: float
-    app_name: str | None = None
-    battery_percent: float | None = None
-    current: int | None = None
-
-    class Status(Enum):
-        WARMING_UP = 2
-        NORMAL = 3
-        NEEDS_CALIBRATION = 10
-
-    @property
-    def unix_timestamp(self) -> int:
-        return round(self.update_time)
-
-    @property
-    def timestamp(self) -> datetime:
-        return datetime.fromtimestamp(self.unix_timestamp, tz=timezone.utc)
-
-    @property
-    def key(self) -> tuple[int, int]:
-        return (self.sensor_id, self.sequence)
-
-    @property
-    def preceding_key(self) -> tuple[int, int]:
-        return (self.sensor_id, self.sequence - 1)
-
-    @property
-    def direction(self) -> str | None:
-        directions = {
-            0: "Flat",
-            1: "FortyFiveUp",
-            2: "SingleUp",
-            3: "DoubleUp",
-            4: "FortyFiveDown",
-            5: "SingleDown",
-            6: "DoubleDown",
-            8: "Flat",
-        }
-        if self.glucose_rate not in directions:
-            logger.warning("unknown glucose rate %i on entry %i", self.glucose_rate, self.sequence)
-        return directions.get(self.glucose_rate)
-
-    @property
-    def nightscout_entry(self) -> dict[str, str | int]:
-        return {
-            "type": "sgv",
-            "date": self.unix_timestamp * 1000,
-            "dateString": self.timestamp.isoformat(),
-            "sgv": round(self.glucose * 18),
-            "direction": self.direction or "NONE",
-            "device": self.device_type,
-        }
-
-    @classmethod
-    def from_easyview(cls, data: dict[str, Any]) -> SensorStatus:
-        try:
-            status = cls.Status(data["status"])
-        except ValueError:
-            logger.warning(
-                "Unknown status '%s' (sensor=%i, sequence=%i)",
-                data["status"],
-                data["sensorId"],
-                data["sequence"],
-            )
-            status = None
-        return cls(
-            app_name=data.get("appName"),
-            battery_percent=data.get("batteryPercent"),
-            current=data.get("current"),
-            device_type=data["deviceType"],
-            glucose=data["glucose"],
-            glucose_rate=data["glucoseRate"],
-            sensor_id=data["sensorId"],
-            sequence=data["sequence"],
-            serial=data["serial"],
-            status=status,
-            update_time=data["updateTime"],
-        )
-
-    @classmethod
-    def from_timestamp(cls, timestamp: datetime, device_type: str) -> SensorStatus:
-        return cls(
-            device_type=device_type,
-            glucose=0,
-            glucose_rate=0,
-            sensor_id=0,
-            sequence=0,
-            serial=0,
-            status=None,
-            update_time=datetime.timestamp(timestamp),
-        )
 
 
 def with_retry(delay: int):
@@ -141,10 +36,10 @@ def with_retry(delay: int):
 class EasyFollow:
     BASE_URL = "https://easyview.medtrum.eu/mobile/ajax"
 
-    def __init__(self, username: str, password: str, timestamp: datetime | None = None) -> None:
+    def __init__(self, username: str, password: str) -> None:
         self.username = username
         self.password = password
-        self.session: requests.Session = requests.Session()
+        self.session = requests.Session()
         self.session.headers.update(
             {
                 "DevInfo": "Android 12;Xiamoi vayu;Android 12",
@@ -152,9 +47,6 @@ class EasyFollow:
                 "User-Agent": "okhttp/3.5.0",
             }
         )
-        self.resume_timestamp = timestamp
-        self._queue: list[SensorStatus] = []
-        self._next_interval = datetime.now(timezone.utc)
 
     def __enter__(self):
         self.open()
@@ -162,36 +54,6 @@ class EasyFollow:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
-    def __iter__(self) -> Iterator[SensorStatus]:
-        return self
-
-    def __next__(self) -> SensorStatus:
-        while not self._queue:
-            delta = (self._next_interval - datetime.now(timezone.utc)).total_seconds()
-            if delta > 0:
-                time.sleep(delta)
-            self._next_interval = datetime.now(timezone.utc) + timedelta(seconds=30)
-
-            raw_status = self.get_status()
-            if raw_status.get("res") == "ERR":
-                logger.error("Easyview API returned: %s.", raw_status.get("msg"))
-                continue
-
-            monitorlist = raw_status.get("monitorlist", [])
-            if len(monitorlist) != 1:
-                logger.warning("Follower should have exactly one CGM user, got %i", len(monitorlist))
-                continue
-
-            sensor_data = monitorlist[0].get("sensor_status")
-            if sensor_data is None:
-                logger.warning("no active sensor found in EasyView account")
-                continue
-
-            cur_stat = SensorStatus.from_easyview(sensor_data)
-            self._queue.append(cur_stat)
-
-        return self._queue.pop(0)
 
     @with_retry(delay=10)
     def _post(self, endpoint: str, data: dict) -> dict[str, Any]:
@@ -223,9 +85,92 @@ class EasyFollow:
     def get_status(self) -> dict[str, Any]:
         return self._get("logindata")
 
+    def get_pump_payload(self) -> dict[str, Any] | None:
+        raw_status = self.get_status()
+
+        if raw_status.get("res") == "ERR":
+            logger.error("EasyView API returned: %s", raw_status.get("msg"))
+            return None
+
+        monitorlist = raw_status.get("monitorlist", [])
+        if len(monitorlist) != 1:
+            logger.warning("Follower should have exactly one CGM user, got %i", len(monitorlist))
+            return None
+
+        monitor = monitorlist[0]
+        logger.info("EasyView monitor payload: %s", monitor)
+
+        device_name = (
+            monitor.get("deviceType")
+            or monitor.get("pumpDeviceType")
+            or "Medtrum Pump"
+        )
+
+        clock_value = (
+            monitor.get("pumpUpdateTime")
+            or monitor.get("lastPumpDataTime")
+            or monitor.get("updateTime")
+        )
+
+        if isinstance(clock_value, (int, float)):
+            clock_iso = datetime.fromtimestamp(clock_value, tz=timezone.utc).isoformat()
+        elif isinstance(clock_value, str):
+            clock_iso = clock_value
+        else:
+            clock_iso = datetime.now(timezone.utc).isoformat()
+
+        reservoir = (
+            monitor.get("reservoir")
+            or monitor.get("insulinLeft")
+            or monitor.get("remainingInsulin")
+            or monitor.get("pumpReservoir")
+        )
+
+        battery_raw = (
+            monitor.get("pumpBatteryPercent")
+            or monitor.get("batteryPercent")
+            or monitor.get("pumpBattery")
+            or monitor.get("battery")
+        )
+
+        status_text = (
+            monitor.get("pumpStatus")
+            or monitor.get("statusText")
+            or monitor.get("status")
+            or "unknown"
+        )
+
+        payload = {
+            "device": device_name,
+            "created_at": clock_iso,
+            "pump": {
+                "clock": clock_iso,
+                "status": {
+                    "status": str(status_text)
+                }
+            }
+        }
+
+        if reservoir is not None:
+            try:
+                payload["pump"]["reservoir"] = float(reservoir)
+            except (TypeError, ValueError):
+                logger.warning("invalid reservoir value: %r", reservoir)
+
+        if battery_raw is not None:
+            battery_obj: dict[str, Any] = {}
+            try:
+                battery_obj["percent"] = float(battery_raw)
+            except (TypeError, ValueError):
+                battery_obj["status"] = str(battery_raw)
+            payload["pump"]["battery"] = battery_obj
+
+        return payload
+
 
 class NightScout:
-    def __init__(self, url, api_secret):
+    def __init__(self, url: str, api_secret: str):
+        self.url = url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -234,7 +179,6 @@ class NightScout:
                 "api-secret": hashlib.sha1(api_secret.encode("utf-8")).hexdigest(),
             }
         )
-        self.url = url
 
     def __enter__(self):
         return self
@@ -243,18 +187,14 @@ class NightScout:
         self.session.close()
 
     @with_retry(delay=10)
-    def add(self, sensor_status: SensorStatus) -> None:
+    def add_devicestatus(self, payload: dict[str, Any]) -> None:
         response = self.session.post(
-            f"{self.url}/api/v1/entries.json",
-            json=[sensor_status.nightscout_entry],
-            timeout=10,
+            f"{self.url}/api/v1/devicestatus.json",
+            json=payload,
+            timeout=15,
         )
         response.raise_for_status()
-        logger.info(
-            "submitted sensor status to nightscout (sensor=%i, sequence=%i)",
-            sensor_status.sensor_id,
-            sensor_status.sequence,
-        )
+        logger.info("submitted pump status to nightscout")
 
 
 def run_uploader():
@@ -264,6 +204,7 @@ def run_uploader():
             str(pathlib.Path.home() / ".nightscout_easyview/secrets.yaml"),
         )
     )
+
     with secrets_file.open(encoding="utf-8") as f:
         secrets = yaml.safe_load(f)
 
@@ -272,14 +213,24 @@ def run_uploader():
     ns_url = secrets["nightscout"]["url"]
     api_secret = secrets["nightscout"]["secret"]
 
+    last_payload_signature = None
+
     while True:
         try:
             with NightScout(ns_url, api_secret) as ns:
                 with EasyFollow(username, password) as ef:
-                    for sensor_status in ef:
-                        ns.add(sensor_status)
+                    while True:
+                        payload = ef.get_pump_payload()
+                        if payload:
+                            signature = str(payload)
+                            if signature != last_payload_signature:
+                                ns.add_devicestatus(payload)
+                                last_payload_signature = signature
+                            else:
+                                logger.info("pump payload unchanged, skipping upload")
+                        time.sleep(60)
         except Exception as e:
-            logger.exception("uploader loop crashed, retrying in 30 seconds: %s", e)
+            logger.exception("pump uploader crashed, retrying in 30 seconds: %s", e)
             time.sleep(30)
 
 
