@@ -302,7 +302,13 @@ class EasyFollow:
                 )
                 raise ValueError("Account should follow exactly one CGM user.")
             self._sensor_status = SensorStatus.from_easyview(
-                status["monitorlist"][0]["sensor_status"]
+                monitor = status.get("monitorlist", [])
+                if not monitor:
+                    return None
+
+                sensor_status = monitor[0].get("sensor_status")
+                if sensor_status is None:
+                    return None
             )
             if self.resume_timestamp is None:
                 self._sensor_status = SensorStatus.from_timestamp(
