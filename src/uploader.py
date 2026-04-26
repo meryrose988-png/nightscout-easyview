@@ -120,14 +120,52 @@ class EasyFollow:
                 "reservoir": float(pump_status["remainingDose"]),
                 "status": {
                     "status": str(pump_status.get("status", "unknown")),
-                }
-            }
+                },
+            },
         }
 
         if "batteryPercent" in pump_status:
             payload["pump"]["battery"] = {"percent": float(pump_status["batteryPercent"])}
 
         return payload
+
+    def get_bolus_event(self) -> dict[str, Any] | None:
+        raw_status = self.get_status()
+
+        if raw_status.get("res") == "ERR":
+            logger.error("EasyView API returned: %s", raw_status.get("msg"))
+            return None
+
+        monitorlist = raw_status.get("monitorlist", [])
+        if len(monitorlist) != 1:
+            logger.warning("Follower should have exactly one monitored user, got %i", len(monitorlist))
+            return None
+
+        monitor = monitorlist[0]
+        pump_status = monitor.get("pump_status")
+        if not pump_status:
+            return None
+
+        delivered = pump_status.get("bolusDeliveried")
+        delivered_time = pump_status.get("bolusDeliveriedTime")
+        if delivered is None or delivered_time is None:
+            return None
+
+        try:
+            insulin = float(delivered)
+            ts = int(delivered_time)
+        except (TypeError, ValueError):
+            return None
+
+        if insulin <= 0:
+            return None
+
+        return {
+            "insulin": round(insulin, 2),
+            "created_at": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+            "bolus_time": ts,
+            "bolus_key": f"{ts}:{round(insulin, 2)}",
+        }
 
 
 class NightScout:
@@ -158,6 +196,22 @@ class NightScout:
         response.raise_for_status()
         logger.info("submitted pump status to nightscout")
 
+    @with_retry(delay=10)
+    def add_treatment(self, payload: dict[str, Any]) -> None:
+        response = self.session.post(
+            f"{self.url}/api/v1/treatments.json",
+            json={
+                "eventType": "Correction Bolus",
+                "created_at": payload["created_at"],
+                "insulin": payload["insulin"],
+                "enteredBy": "nightscout-easyview",
+                "notes": f"EasyView bolus {payload['insulin']}U",
+            },
+            timeout=15,
+        )
+        response.raise_for_status()
+        logger.info("submitted bolus treatment to nightscout")
+
 
 def run_uploader():
     secrets_file = pathlib.Path(
@@ -176,20 +230,30 @@ def run_uploader():
     api_secret = secrets["nightscout"]["secret"]
 
     last_payload_signature = None
+    last_bolus_key = None
 
     while True:
         try:
             with NightScout(ns_url, api_secret) as ns:
                 with EasyFollow(username, password) as ef:
                     while True:
-                        payload = ef.get_pump_payload()
-                        if payload:
-                            signature = str(payload)
+                        pump_payload = ef.get_pump_payload()
+                        if pump_payload:
+                            signature = str(pump_payload)
                             if signature != last_payload_signature:
-                                ns.add_devicestatus(payload)
+                                ns.add_devicestatus(pump_payload)
                                 last_payload_signature = signature
                             else:
                                 logger.info("pump payload unchanged, skipping upload")
+
+                        bolus_event = ef.get_bolus_event()
+                        if bolus_event:
+                            if bolus_event["bolus_key"] != last_bolus_key:
+                                ns.add_treatment(bolus_event)
+                                last_bolus_key = bolus_event["bolus_key"]
+                            else:
+                                logger.info("bolus already sent, skipping")
+
                         time.sleep(60)
         except Exception as e:
             logger.exception("pump uploader crashed, retrying in 30 seconds: %s", e)
