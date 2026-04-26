@@ -1,5 +1,3 @@
-"""Nightscout uploader for CGM data from Medtrum EasyView."""
-
 from __future__ import annotations
 
 import functools
@@ -24,8 +22,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SensorStatus:
-    """Dataclass representing a Medtrum sensor status."""
-
     device_type: str
     glucose: float
     glucose_rate: int
@@ -39,8 +35,6 @@ class SensorStatus:
     current: int | None = None
 
     class Status(Enum):
-        """Medtrum Status"""
-
         WARMING_UP = 2
         NORMAL = 3
         NEEDS_CALIBRATION = 10
@@ -74,11 +68,7 @@ class SensorStatus:
             8: "Flat",
         }
         if self.glucose_rate not in directions:
-            logger.warning(
-                "unknown glucose rate %i on entry %i",
-                self.glucose_rate,
-                self.sequence,
-            )
+            logger.warning("unknown glucose rate %i on entry %i", self.glucose_rate, self.sequence)
         return directions.get(self.glucose_rate)
 
     @property
@@ -119,39 +109,6 @@ class SensorStatus:
         )
 
     @classmethod
-    def from_download(
-        cls,
-        record: tuple[str, float, float, float, str, float],
-        device_type,
-    ) -> SensorStatus:
-        pattern = r"^(?P<uid>\d+)-(?P<serial>\d+)-(?P<sensorId>\d+)-(?P<sequence>\d+)$"
-        match = re.match(pattern, record[0])
-        if not match:
-            raise ValueError("invalid EasyView download record")
-        status = {
-            "C": cls.Status.NORMAL,
-            "H": cls.Status.WARMING_UP,
-            "XC": cls.Status.NEEDS_CALIBRATION,
-        }
-        if record[4] not in status:
-            logger.warning(
-                "Unknown status '%s' in EasyView download record (sensor=%i, sequence=%i)",
-                record[4],
-                int(match.group("sensorId")),
-                int(match.group("sequence")),
-            )
-        return cls(
-            device_type=device_type,
-            glucose=record[3],
-            glucose_rate=round(record[5]),
-            sensor_id=int(match.group("sensorId")),
-            sequence=int(match.group("sequence")),
-            serial=int(match.group("serial")),
-            status=status.get(record[4]),
-            update_time=record[1],
-        )
-
-    @classmethod
     def from_timestamp(cls, timestamp: datetime, device_type: str) -> SensorStatus:
         return cls(
             device_type=device_type,
@@ -183,7 +140,6 @@ def with_retry(delay: int):
 
 class EasyFollow:
     BASE_URL = "https://easyview.medtrum.eu/mobile/ajax"
-    _sensor_status: SensorStatus | None = None
 
     def __init__(self, username: str, password: str, timestamp: datetime | None = None) -> None:
         self.username = username
@@ -212,7 +168,6 @@ class EasyFollow:
 
     def __next__(self) -> SensorStatus:
         while not self._queue:
-            cur_stat = self.sensor_status
             delta = (self._next_interval - datetime.now(timezone.utc)).total_seconds()
             if delta > 0:
                 time.sleep(delta)
@@ -225,10 +180,7 @@ class EasyFollow:
 
             monitorlist = raw_status.get("monitorlist", [])
             if len(monitorlist) != 1:
-                logger.warning(
-                    "Follower should have exactly one CGM user, got %i",
-                    len(monitorlist),
-                )
+                logger.warning("Follower should have exactly one CGM user, got %i", len(monitorlist))
                 continue
 
             sensor_data = monitorlist[0].get("sensor_status")
@@ -236,115 +188,22 @@ class EasyFollow:
                 logger.warning("no active sensor found in EasyView account")
                 continue
 
-            new_stat = SensorStatus.from_easyview(sensor_data)
+            cur_stat = SensorStatus.from_easyview(sensor_data)
+            self._queue.append(cur_stat)
 
-            if new_stat.key == cur_stat.key:
-                logger.debug(
-                    "no new data on EasyView (sensor=%i, sequence=%i)",
-                    cur_stat.sensor_id,
-                    cur_stat.sequence,
-                )
-                continue
-
-            if new_stat.preceding_key != cur_stat.key:
-                for s in self.history(cur_stat.timestamp, new_stat.timestamp):
-                    if new_stat.key > s.key > cur_stat.key:
-                        self._queue.append(s)
-
-            self._queue.append(new_stat)
-            self._next_interval = max(
-                new_stat.timestamp + timedelta(seconds=150),
-                self._next_interval,
-            )
-
-        self.sensor_status = self._queue.pop(0)
-        return self.sensor_status
+        return self._queue.pop(0)
 
     @with_retry(delay=10)
     def _post(self, endpoint: str, data: dict) -> dict[str, Any]:
-        response = self.session.post(
-            f"{self.BASE_URL}/{endpoint}", data=data, timeout=10
-        )
+        response = self.session.post(f"{self.BASE_URL}/{endpoint}", data=data, timeout=10)
         response.raise_for_status()
         return response.json()
 
     @with_retry(delay=10)
     def _get(self, endpoint: str, params: dict | None = None) -> dict[str, Any]:
-        response = self.session.get(
-            f"{self.BASE_URL}/{endpoint}", params=params, timeout=10
-        )
+        response = self.session.get(f"{self.BASE_URL}/{endpoint}", params=params, timeout=10)
         response.raise_for_status()
         return response.json()
-
-    @functools.cached_property
-    def cgm_username(self) -> str:
-        status = self.get_status()
-        return status["monitorlist"][0]["username"]
-
-    @property
-    def sensor_status(self) -> SensorStatus:
-        if self._sensor_status is None:
-            status = self.get_status()
-            monitorlist = status.get("monitorlist", [])
-            if len(monitorlist) != 1:
-                logger.warning(
-                    "Follower should have exactly one CGM user, got %i",
-                    len(monitorlist),
-                )
-                self._sensor_status = SensorStatus.from_timestamp(
-                    datetime.now(timezone.utc) - timedelta(hours=48),
-                    "Medtrum CGM",
-                )
-                return self._sensor_status
-
-            sensor_data = monitorlist[0].get("sensor_status")
-            device_type = monitorlist[0].get("deviceType", "Medtrum CGM")
-
-            if sensor_data is None:
-                logger.warning("no active sensor found in EasyView account")
-                self._sensor_status = SensorStatus.from_timestamp(
-                    datetime.now(timezone.utc) - timedelta(hours=48),
-                    device_type,
-                )
-                return self._sensor_status
-
-            self._sensor_status = SensorStatus.from_easyview(sensor_data)
-
-            if self.resume_timestamp is None:
-                self._sensor_status = SensorStatus.from_timestamp(
-                    self._sensor_status.timestamp - timedelta(hours=48),
-                    self._sensor_status.device_type,
-                )
-            elif self.resume_timestamp != self._sensor_status.timestamp:
-                self._sensor_status = SensorStatus.from_timestamp(
-                    self.resume_timestamp,
-                    self._sensor_status.device_type,
-                )
-
-        return self._sensor_status
-
-    @sensor_status.setter
-    def sensor_status(self, value: SensorStatus):
-        if value.key == self.sensor_status.key:
-            logger.debug(
-                "status is current (sensor=%i, sequence=%i)",
-                value.sensor_id,
-                value.sequence,
-            )
-            raise ValueError("sensor status is already current")
-        if self.sensor_status.key > value.key:
-            logger.error(
-                "sensor status is outdated (sensor=%i, sequence=%i)",
-                value.sensor_id,
-                value.sequence,
-            )
-            raise ValueError("invalid sensor status")
-        self._sensor_status = value
-        logger.debug(
-            "sensor status updated (sensor=%i, sequence=%i)",
-            self.sensor_status.sensor_id,
-            self.sensor_status.sequence,
-        )
 
     def open(self) -> None:
         data = {
@@ -363,24 +222,6 @@ class EasyFollow:
 
     def get_status(self) -> dict[str, Any]:
         return self._get("logindata")
-
-    def get_downloads(self, start: datetime, end: datetime) -> dict[str, Any]:
-        params = {
-            "flag": "sg",
-            "st": (start + timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S"),
-            "et": (end - timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S"),
-            "user_name": self.cgm_username,
-        }
-        return self._get("download", params)
-
-    def history(self, start, end) -> Iterator[SensorStatus]:
-        downloads = self.get_downloads(start, end)["data"]
-        device_type = self.sensor_status.device_type
-        for rec in map(tuple, downloads):
-            try:
-                yield SensorStatus.from_download(rec, device_type=device_type)
-            except ValueError:
-                pass
 
 
 class NightScout:
@@ -401,37 +242,19 @@ class NightScout:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.session.close()
 
-    @property
-    def timestamp(self) -> datetime | None:
-        response = self.session.get(
-            f"{self.url}/api/v1/entries.json", params={"count": 1}, timeout=10
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data:
-            return datetime.fromtimestamp(data[0]["date"] / 1000, tz=timezone.utc)
-        return None
-
     @with_retry(delay=10)
     def add(self, sensor_status: SensorStatus) -> None:
-        if sensor_status.status is SensorStatus.Status.WARMING_UP:
-            logger.info(
-                "sensor is warming up (sensor=%i, sequence=%i)",
-                sensor_status.sensor_id,
-                sensor_status.sequence,
-            )
-        else:
-            response = self.session.post(
-                f"{self.url}/api/v1/entries.json",
-                json=[sensor_status.nightscout_entry],
-                timeout=10,
-            )
-            response.raise_for_status()
-            logger.info(
-                "submitted sensor status to nightscout (sensor=%i, sequence=%i)",
-                sensor_status.sensor_id,
-                sensor_status.sequence,
-            )
+        response = self.session.post(
+            f"{self.url}/api/v1/entries.json",
+            json=[sensor_status.nightscout_entry],
+            timeout=10,
+        )
+        response.raise_for_status()
+        logger.info(
+            "submitted sensor status to nightscout (sensor=%i, sequence=%i)",
+            sensor_status.sensor_id,
+            sensor_status.sequence,
+        )
 
 
 def run_uploader():
@@ -452,7 +275,7 @@ def run_uploader():
     while True:
         try:
             with NightScout(ns_url, api_secret) as ns:
-                with EasyFollow(username, password, ns.timestamp) as ef:
+                with EasyFollow(username, password) as ef:
                     for sensor_status in ef:
                         ns.add(sensor_status)
         except Exception as e:
