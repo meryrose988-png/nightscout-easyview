@@ -290,26 +290,27 @@ class EasyFollow:
         status = self.get_status()
         return status["monitorlist"][0]["username"]
 
-    @property
+        @property
     def sensor_status(self) -> SensorStatus:
         """Return the last retrieved sensor status."""
         if self._sensor_status is None:
             status = self.get_status()
-            if len(status["monitorlist"]) != 1:
+
+            monitorlist = status.get("monitorlist", [])
+            if len(monitorlist) != 1:
                 logger.error(
                     "Follower should have exactly one CGM user, got %i",
-                    len(status["monitorlist"]),
+                    len(monitorlist),
                 )
                 raise ValueError("Account should follow exactly one CGM user.")
-            self._sensor_status = SensorStatus.from_easyview(
-                monitor = status.get("monitorlist", [])
-                if not monitor:
-                    return None
 
-                sensor_status = monitor[0].get("sensor_status")
-                if sensor_status is None:
-                    return None
-            )
+            sensor_data = monitorlist[0].get("sensor_status")
+            if sensor_data is None:
+                logger.warning("no active sensor found in EasyView account")
+                raise ValueError("No active sensor found in EasyView account.")
+
+            self._sensor_status = SensorStatus.from_easyview(sensor_data)
+
             if self.resume_timestamp is None:
                 self._sensor_status = SensorStatus.from_timestamp(
                     self._sensor_status.timestamp - timedelta(hours=48),
@@ -319,6 +320,7 @@ class EasyFollow:
                 self._sensor_status = SensorStatus.from_timestamp(
                     self.resume_timestamp, self._sensor_status.device_type
                 )
+
         return self._sensor_status
 
     @sensor_status.setter
