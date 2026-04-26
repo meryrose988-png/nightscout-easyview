@@ -94,76 +94,38 @@ class EasyFollow:
 
         monitorlist = raw_status.get("monitorlist", [])
         if len(monitorlist) != 1:
-            logger.warning("Follower should have exactly one CGM user, got %i", len(monitorlist))
+            logger.warning("Follower should have exactly one monitored user, got %i", len(monitorlist))
             return None
 
         monitor = monitorlist[0]
-        logger.info("EasyView monitor payload: %s", monitor)
+        pump_status = monitor.get("pump_status")
 
-        device_name = (
-            monitor.get("deviceType")
-            or monitor.get("pumpDeviceType")
-            or "Medtrum Pump"
-        )
+        if not pump_status:
+            logger.warning("no pump_status found in EasyView account")
+            return None
 
-        clock_value = (
-            monitor.get("pumpUpdateTime")
-            or monitor.get("lastPumpDataTime")
-            or monitor.get("updateTime")
-        )
+        logger.info("EasyView pump payload: %s", pump_status)
 
-        if isinstance(clock_value, (int, float)):
-            clock_iso = datetime.fromtimestamp(clock_value, tz=timezone.utc).isoformat()
-        elif isinstance(clock_value, str):
-            clock_iso = clock_value
+        update_time = pump_status.get("updateTime")
+        if isinstance(update_time, (int, float)):
+            clock_iso = datetime.fromtimestamp(update_time, tz=timezone.utc).isoformat()
         else:
             clock_iso = datetime.now(timezone.utc).isoformat()
 
-        reservoir = (
-            monitor.get("reservoir")
-            or monitor.get("insulinLeft")
-            or monitor.get("remainingInsulin")
-            or monitor.get("pumpReservoir")
-        )
-
-        battery_raw = (
-            monitor.get("pumpBatteryPercent")
-            or monitor.get("batteryPercent")
-            or monitor.get("pumpBattery")
-            or monitor.get("battery")
-        )
-
-        status_text = (
-            monitor.get("pumpStatus")
-            or monitor.get("statusText")
-            or monitor.get("status")
-            or "unknown"
-        )
-
         payload = {
-            "device": device_name,
+            "device": f"Medtrum Pump {pump_status.get('serial', '')}".strip(),
             "created_at": clock_iso,
             "pump": {
                 "clock": clock_iso,
+                "reservoir": float(pump_status["remainingDose"]),
                 "status": {
-                    "status": str(status_text)
+                    "status": str(pump_status.get("status", "unknown")),
                 }
             }
         }
 
-        if reservoir is not None:
-            try:
-                payload["pump"]["reservoir"] = float(reservoir)
-            except (TypeError, ValueError):
-                logger.warning("invalid reservoir value: %r", reservoir)
-
-        if battery_raw is not None:
-            battery_obj: dict[str, Any] = {}
-            try:
-                battery_obj["percent"] = float(battery_raw)
-            except (TypeError, ValueError):
-                battery_obj["status"] = str(battery_raw)
-            payload["pump"]["battery"] = battery_obj
+        if "batteryPercent" in pump_status:
+            payload["pump"]["battery"] = {"percent": float(pump_status["batteryPercent"])}
 
         return payload
 
