@@ -47,27 +47,22 @@ class SensorStatus:
 
     @property
     def unix_timestamp(self) -> int:
-        """Return the timestamp as an integer."""
         return round(self.update_time)
 
     @property
     def timestamp(self) -> datetime:
-        """Return the timestamp as a datetime object."""
         return datetime.fromtimestamp(self.unix_timestamp, tz=timezone.utc)
 
     @property
     def key(self) -> tuple[int, int]:
-        """Return unique key for the entry."""
         return (self.sensor_id, self.sequence)
 
     @property
     def preceding_key(self) -> tuple[int, int]:
-        """Return preceding key for the entry."""
         return (self.sensor_id, self.sequence - 1)
 
     @property
     def direction(self) -> str | None:
-        """Return direction of glucose change."""
         directions = {
             0: "Flat",
             1: "FortyFiveUp",
@@ -88,7 +83,6 @@ class SensorStatus:
 
     @property
     def nightscout_entry(self) -> dict[str, str | int]:
-        """Return sensor status as Nightscout entry."""
         return {
             "type": "sgv",
             "date": self.unix_timestamp * 1000,
@@ -100,7 +94,6 @@ class SensorStatus:
 
     @classmethod
     def from_easyview(cls, data: dict[str, Any]) -> SensorStatus:
-        """Create a SensorStatus from EasyView sensor_status dictionary."""
         try:
             status = cls.Status(data["status"])
         except ValueError:
@@ -131,7 +124,6 @@ class SensorStatus:
         record: tuple[str, float, float, float, str, float],
         device_type,
     ) -> SensorStatus:
-        """Create a SensorStatus from EasyView download record."""
         pattern = r"^(?P<uid>\d+)-(?P<serial>\d+)-(?P<sensorId>\d+)-(?P<sequence>\d+)$"
         match = re.match(pattern, record[0])
         if not match:
@@ -161,7 +153,6 @@ class SensorStatus:
 
     @classmethod
     def from_timestamp(cls, timestamp: datetime, device_type: str) -> SensorStatus:
-        """Create a SensorStatus with only timestamp set."""
         return cls(
             device_type=device_type,
             glucose=0,
@@ -175,8 +166,6 @@ class SensorStatus:
 
 
 def with_retry(delay: int):
-    """Decorator to retry on session Timeout or ConnectionError."""
-
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -188,22 +177,15 @@ def with_retry(delay: int):
                 except requests.exceptions.ConnectionError:
                     logger.info("Network connection error, retrying")
                 time.sleep(delay)
-
         return wrapper
-
     return decorator
 
 
 class EasyFollow:
-    """Class that interacts with the EasyView API from a Follow account."""
-
     BASE_URL = "https://easyview.medtrum.eu/mobile/ajax"
     _sensor_status: SensorStatus | None = None
 
-    def __init__(
-        self, username: str, password: str, timestamp: datetime | None = None
-    ) -> None:
-        """Initialize with username, password and optional resume timestamp."""
+    def __init__(self, username: str, password: str, timestamp: datetime | None = None) -> None:
         self.username = username
         self.password = password
         self.session: requests.Session = requests.Session()
@@ -219,19 +201,16 @@ class EasyFollow:
         self._next_interval = datetime.now(timezone.utc)
 
     def __enter__(self):
-        """Context manager entry, opens connection to EasyView."""
         self.open()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit, closes connection to EasyView."""
         self.close()
 
     def __iter__(self) -> Iterator[SensorStatus]:
         return self
 
     def __next__(self) -> SensorStatus:
-        """Returns next SensorStatus from EasyView."""
         while not self._queue:
             cur_stat = self.sensor_status
             delta = (self._next_interval - datetime.now(timezone.utc)).total_seconds()
@@ -283,7 +262,6 @@ class EasyFollow:
 
     @with_retry(delay=10)
     def _post(self, endpoint: str, data: dict) -> dict[str, Any]:
-        """Send a POST request to the specified endpoint with the given data."""
         response = self.session.post(
             f"{self.BASE_URL}/{endpoint}", data=data, timeout=10
         )
@@ -292,7 +270,6 @@ class EasyFollow:
 
     @with_retry(delay=10)
     def _get(self, endpoint: str, params: dict | None = None) -> dict[str, Any]:
-        """Send a GET request to the specified endpoint with the given parameters."""
         response = self.session.get(
             f"{self.BASE_URL}/{endpoint}", params=params, timeout=10
         )
@@ -301,17 +278,14 @@ class EasyFollow:
 
     @functools.cached_property
     def cgm_username(self) -> str:
-        """Get the username of the user carrying the CGM."""
         status = self.get_status()
         return status["monitorlist"][0]["username"]
 
     @property
     def sensor_status(self) -> SensorStatus:
-        """Return the last retrieved sensor status."""
         if self._sensor_status is None:
             status = self.get_status()
             monitorlist = status.get("monitorlist", [])
-
             if len(monitorlist) != 1:
                 logger.warning(
                     "Follower should have exactly one CGM user, got %i",
@@ -351,7 +325,6 @@ class EasyFollow:
 
     @sensor_status.setter
     def sensor_status(self, value: SensorStatus):
-        """Update sensor status."""
         if value.key == self.sensor_status.key:
             logger.debug(
                 "status is current (sensor=%i, sequence=%i)",
@@ -374,7 +347,6 @@ class EasyFollow:
         )
 
     def open(self) -> None:
-        """Establish a connection to EasyView."""
         data = {
             "apptype": "Follow",
             "user_name": self.username,
@@ -386,16 +358,13 @@ class EasyFollow:
         logger.info("logged in to EasyView as %s", self.username)
 
     def close(self) -> None:
-        """Closes the connection to EasyView."""
         logger.info("closed connection to EasyView")
         self.session.close()
 
     def get_status(self) -> dict[str, Any]:
-        """Get CGM data from the EasyView API."""
         return self._get("logindata")
 
     def get_downloads(self, start: datetime, end: datetime) -> dict[str, Any]:
-        """Get historical sensor status data from EasyView API."""
         params = {
             "flag": "sg",
             "st": (start + timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S"),
@@ -405,7 +374,6 @@ class EasyFollow:
         return self._get("download", params)
 
     def history(self, start, end) -> Iterator[SensorStatus]:
-        """Returns iterator of SensorStatus objects for requested period."""
         downloads = self.get_downloads(start, end)["data"]
         device_type = self.sensor_status.device_type
         for rec in map(tuple, downloads):
@@ -416,8 +384,6 @@ class EasyFollow:
 
 
 class NightScout:
-    """Class that interacts with Nightscout to sync CGM data."""
-
     def __init__(self, url, api_secret):
         self.session = requests.Session()
         self.session.headers.update(
@@ -437,7 +403,6 @@ class NightScout:
 
     @property
     def timestamp(self) -> datetime | None:
-        """Get last sensor value timestamp from Nightscout."""
         response = self.session.get(
             f"{self.url}/api/v1/entries.json", params={"count": 1}, timeout=10
         )
@@ -449,7 +414,6 @@ class NightScout:
 
     @with_retry(delay=10)
     def add(self, sensor_status: SensorStatus) -> None:
-        """Add a sensor value to Nightscout."""
         if sensor_status.status is SensorStatus.Status.WARMING_UP:
             logger.info(
                 "sensor is warming up (sensor=%i, sequence=%i)",
@@ -471,14 +435,12 @@ class NightScout:
 
 
 def run_uploader():
-    """Run the EasyView -> Nightscout sync loop forever."""
     secrets_file = pathlib.Path(
         os.getenv(
             "SECRETS_FILE",
             str(pathlib.Path.home() / ".nightscout_easyview/secrets.yaml"),
         )
     )
-
     with secrets_file.open(encoding="utf-8") as f:
         secrets = yaml.safe_load(f)
 
@@ -510,7 +472,6 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    """Start uploader thread and bind HTTP port for Render."""
     uploader_thread = threading.Thread(target=run_uploader, daemon=True)
     uploader_thread.start()
 
